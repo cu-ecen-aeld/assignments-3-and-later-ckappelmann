@@ -1,4 +1,8 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,6 +20,11 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int ret = system(cmd);
+
+    if(ret < 0) {
+        return false;
+    }
 
     return true;
 }
@@ -45,9 +54,6 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
 /*
  * TODO:
@@ -58,10 +64,25 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    int fork_pid = fork();
+    if (fork_pid == -1) {
+        return false;
+    }
+
+    if (fork_pid == 0) {
+        execv(command[0], command);
+        exit(1);
+    } else {
+        int status;
+        wait(&status);
+        if(WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            return true;
+        }
+    }
 
     va_end(args);
 
-    return true;
+    return false;
 }
 
 /**
@@ -80,10 +101,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
 
 /*
  * TODO
@@ -92,7 +109,33 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0) {
+        return false;
+    }
 
+    int fork_pid = fork();
+
+    if (fork_pid == -1) {
+        return false;
+    }
+
+    if (fork_pid == 0) {
+        int ret = dup2(fd, 1);
+        if(ret < 0) {
+            close(fd);
+            exit(1);
+        }
+        execv(command[0], command);
+        exit(1);
+    } else {
+        int status;
+        wait(&status);
+        close(fd);
+        if(WEXITSTATUS(status) != 0) {
+            return false;
+        }
+    }
     va_end(args);
 
     return true;
