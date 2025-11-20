@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <sys/queue.h>
 #include <pthread.h>
+#include <time.h>
 
 #define TAG "aesdsocket"
 #define WRITE_FILE "/var/tmp/aesdsocketdata"
@@ -34,6 +35,12 @@ struct thread_data_s
     entries;
 };
 SLIST_HEAD(thread_data_head_t, thread_data_s);
+
+struct timestamp_data_s
+{
+    int fd;
+    pthread_mutex_t *mutex;
+};
 
 static volatile sig_atomic_t exit_flag = false;
 
@@ -216,6 +223,40 @@ void *connection_thread(void *data)
     return data;
 }
 
+void *timestamp_thread(void *data)
+{
+    struct timestamp_data_s *timestamp_data = (struct timestamp_data_s *)data;
+
+    struct timespec next_time;
+    clock_gettime(CLOCK_MONOTONIC, &next_time);
+
+    while (!exit_flag)
+    {
+        next_time.tv_sec += 10;
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL) == EINTR && !exit_flag)
+        {
+        }
+
+        if (exit_flag)
+        {
+            break;
+        }
+
+        pthread_mutex_lock(timestamp_data->mutex);
+        char timestamp[200];
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", tm_info);
+
+        lseek(timestamp_data->fd, 0, SEEK_END);
+        write(timestamp_data->fd, timestamp, strlen(timestamp));
+
+        pthread_mutex_unlock(timestamp_data->mutex);
+    }
+
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     bool daemon_mode = false;
@@ -318,7 +359,7 @@ int main(int argc, char **argv)
     }
 
     // Open data file
-    fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
     {
         syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
@@ -331,6 +372,14 @@ int main(int argc, char **argv)
     SLIST_INIT(&thread_data_head);
     pthread_mutex_t mutex;
     pthread_mutex_init(&mutex, NULL);
+
+    // Start timestamp thread
+    pthread_t timestamp_pthread;
+    struct timestamp_data_s timestamp_data;
+    timestamp_data.fd = fd;
+    timestamp_data.mutex = &mutex;
+
+    pthread_create(&timestamp_pthread, 0, timestamp_thread, (void *)&timestamp_data);
 
     // Main server loop
     while (!exit_flag)
@@ -395,7 +444,32 @@ int main(int argc, char **argv)
         }
     }
 
+    shutdown(sock, SHUT_RDWR);
     // Cleanup
+    pthread_join(timestamp_pthread, NULL);
+
+    // Join remaining connections
+    while (true)
+    {
+        // Join and delete from the head
+        struct thread_data_s *first = SLIST_FIRST(&thread_data_head);
+        if (first != NULL)
+        {
+            if (!first->joined)
+            {
+                pthread_join(first->thread, NULL);
+                first->joined = true;
+            }
+            SLIST_REMOVE_HEAD(&thread_data_head, entries);
+            free(first);
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    pthread_mutex_destroy(&mutex);
     close(sock);
     close(fd);
     unlink(WRITE_FILE);
