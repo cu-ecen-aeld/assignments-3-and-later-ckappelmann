@@ -248,8 +248,18 @@ void *timestamp_thread(void *data)
         struct tm *tm_info = localtime(&now);
         strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", tm_info);
 
-        lseek(timestamp_data->fd, 0, SEEK_END);
-        write(timestamp_data->fd, timestamp, strlen(timestamp));
+        if (lseek(timestamp_data->fd, 0, SEEK_END) == -1)
+        {
+            syslog(LOG_ERR, "Failed to seek to end of file: %s", strerror(errno));
+        }
+        else
+        {
+            ssize_t written = write(timestamp_data->fd, timestamp, strlen(timestamp));
+            if (written == -1)
+            {
+                syslog(LOG_ERR, "Failed to write timestamp: %s", strerror(errno));
+            }
+        }
 
         pthread_mutex_unlock(timestamp_data->mutex);
     }
