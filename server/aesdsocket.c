@@ -17,7 +17,11 @@
 #include <time.h>
 
 #define TAG "aesdsocket"
+#ifdef USE_AESD_CHAR_DEVICE
+#define WRITE_FILE "/dev/aesdchar"
+#else
 #define WRITE_FILE "/var/tmp/aesdsocketdata"
+#endif
 #define PORT 9000
 #define BUFFER_SIZE 4096
 
@@ -223,6 +227,7 @@ void *connection_thread(void *data)
     return data;
 }
 
+#ifdef USE_AESD_CHAR_DEVICE
 void *timestamp_thread(void *data)
 {
     struct timestamp_data_s *timestamp_data = (struct timestamp_data_s *)data;
@@ -266,6 +271,7 @@ void *timestamp_thread(void *data)
 
     return NULL;
 }
+#endif
 
 int main(int argc, char **argv)
 {
@@ -384,12 +390,15 @@ int main(int argc, char **argv)
     pthread_mutex_init(&mutex, NULL);
 
     // Start timestamp thread
+
+#ifdef USE_AESD_CHAR_DEVICE
     pthread_t timestamp_pthread;
     struct timestamp_data_s timestamp_data;
     timestamp_data.fd = fd;
     timestamp_data.mutex = &mutex;
 
     pthread_create(&timestamp_pthread, 0, timestamp_thread, (void *)&timestamp_data);
+#endif
 
     // Main server loop
     while (!exit_flag)
@@ -456,7 +465,10 @@ int main(int argc, char **argv)
 
     shutdown(sock, SHUT_RDWR);
     // Cleanup
+
+#ifdef USE_AESD_CHAR_DEVICE
     pthread_join(timestamp_pthread, NULL);
+#endif
 
     // Join remaining connections
     while (true)
