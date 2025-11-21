@@ -494,7 +494,12 @@ int main(int argc, char **argv)
     pthread_mutex_destroy(&mutex);
     close(sock);
     close(fd);
+
+#ifdef USE_AESD_CHAR_DEVICE
+    // Only delete the file if we are using the temp file
     unlink(WRITE_FILE);
+#endif
+
     closelog();
 
     return ret;
