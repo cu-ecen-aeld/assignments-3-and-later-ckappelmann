@@ -227,7 +227,7 @@ void *connection_thread(void *data)
     return data;
 }
 
-#ifdef USE_AESD_CHAR_DEVICE
+#ifndef USE_AESD_CHAR_DEVICE
 void *timestamp_thread(void *data)
 {
     struct timestamp_data_s *timestamp_data = (struct timestamp_data_s *)data;
@@ -391,7 +391,7 @@ int main(int argc, char **argv)
 
     // Start timestamp thread
 
-#ifdef USE_AESD_CHAR_DEVICE
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_t timestamp_pthread;
     struct timestamp_data_s timestamp_data;
     timestamp_data.fd = fd;
@@ -403,6 +403,34 @@ int main(int argc, char **argv)
     // Main server loop
     while (!exit_flag)
     {
+        // Make a file descriptor for accept select
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(fd, &readfds);
+
+        // Create a select timeout for polling exit_flag
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 100000;
+
+        // Wait for connection or timeout
+        int select_ret = select(sock + 1, &readfds, NULL, NULL, &timeout);
+        if (select_ret == -1)
+        {
+            if (errno == EINTR)
+            {
+                // Interrupted by signal, check exit_flag
+                continue;
+            }
+            syslog(LOG_ERR, "select() failed: %s", strerror(errno));
+            break;
+        }
+        if (select_ret == 0)
+        {
+            // Timeout - no connection available, loop back to check exit_flag
+            continue;
+        }
+        
         // Create a new node
         struct thread_data_s *new_thread_data = malloc(sizeof(struct thread_data_s));
 
@@ -466,7 +494,7 @@ int main(int argc, char **argv)
     shutdown(sock, SHUT_RDWR);
     // Cleanup
 
-#ifdef USE_AESD_CHAR_DEVICE
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_join(timestamp_pthread, NULL);
 #endif
 
@@ -495,7 +523,7 @@ int main(int argc, char **argv)
     close(sock);
     close(fd);
 
-#ifdef USE_AESD_CHAR_DEVICE
+#ifndef USE_AESD_CHAR_DEVICE
     // Only delete the file if we are using the temp file
     unlink(WRITE_FILE);
 #endif
