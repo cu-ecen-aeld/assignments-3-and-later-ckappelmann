@@ -59,6 +59,16 @@ void *connection_thread(void *data)
 
     struct thread_data_s *thread_data = (struct thread_data_s *)data;
 
+    // Open data file
+    thread_data->fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (thread_data->fd < 0)
+    {
+        syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
+        close(thread_data->client_sock);
+        thread_data->finished = true;
+        return data;
+    }
+
     char *client_ip = inet_ntoa(thread_data->client_addr.sin_addr);
     syslog(LOG_INFO, "Accepted connection from %s", client_ip);
 
@@ -68,6 +78,7 @@ void *connection_thread(void *data)
     {
         syslog(LOG_ERR, "Failed to allocate memory for receive buffer");
         close(thread_data->client_sock);
+        close(thread_data->fd);
         thread_data->finished = true;
         return data;
     }
@@ -125,33 +136,9 @@ void *connection_thread(void *data)
                 break;
             }
 
-            // Seek to the end for next append
-            if (lseek(thread_data->fd, 0, SEEK_END) == -1)
-            {
-                syslog(LOG_ERR, "Failed to seek to end of file: %s", strerror(errno));
-                connection_error = true;
-                if (0 != pthread_mutex_unlock(thread_data->mutex))
-                {
-                    syslog(LOG_ERR, "Failed to unlock mutex");
-                }
-            }
-
             if (write(thread_data->fd, buffer, packet_size) == -1)
             {
                 syslog(LOG_ERR, "Failed to write data to file: %s", strerror(errno));
-                connection_error = true;
-                if (0 != pthread_mutex_unlock(thread_data->mutex))
-                {
-                    syslog(LOG_ERR, "Failed to unlock mutex");
-                }
-                break;
-            }
-
-            // Send entire file contents back to client
-            off_t file_size = lseek(thread_data->fd, 0, SEEK_END);
-            if (file_size == -1)
-            {
-                syslog(LOG_ERR, "Failed to get file size: %s", strerror(errno));
                 connection_error = true;
                 if (0 != pthread_mutex_unlock(thread_data->mutex))
                 {
@@ -221,7 +208,8 @@ void *connection_thread(void *data)
     free(buffer);
     close(thread_data->client_sock);
     syslog(LOG_INFO, "Closed connection from %s", client_ip);
-
+    close(thread_data->fd);
+    thread_data->fd = 0;
     thread_data->finished = true;
 
     return data;
@@ -253,17 +241,10 @@ void *timestamp_thread(void *data)
         struct tm *tm_info = localtime(&now);
         strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", tm_info);
 
-        if (lseek(timestamp_data->fd, 0, SEEK_END) == -1)
+        ssize_t written = write(timestamp_data->fd, timestamp, strlen(timestamp));
+        if (written == -1)
         {
-            syslog(LOG_ERR, "Failed to seek to end of file: %s", strerror(errno));
-        }
-        else
-        {
-            ssize_t written = write(timestamp_data->fd, timestamp, strlen(timestamp));
-            if (written == -1)
-            {
-                syslog(LOG_ERR, "Failed to write timestamp: %s", strerror(errno));
-            }
+            syslog(LOG_ERR, "Failed to write timestamp: %s", strerror(errno));
         }
 
         pthread_mutex_unlock(timestamp_data->mutex);
@@ -276,7 +257,6 @@ void *timestamp_thread(void *data)
 int main(int argc, char **argv)
 {
     bool daemon_mode = false;
-    int fd = -1;
     int sock = -1;
     int ret = 0;
 
@@ -374,15 +354,6 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    // Open data file
-    fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-    {
-        syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
-        close(sock);
-        return -1;
-    }
-
     // Linked list head
     struct thread_data_head_t thread_data_head;
     SLIST_INIT(&thread_data_head);
@@ -392,12 +363,25 @@ int main(int argc, char **argv)
     // Start timestamp thread
 
 #ifndef USE_AESD_CHAR_DEVICE
+
     pthread_t timestamp_pthread;
     struct timestamp_data_s timestamp_data;
-    timestamp_data.fd = fd;
+    timestamp_data.fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (timestamp_data.fd < 0)
+    {
+        syslog(LOG_ERR, "Failed to open file: %s", strerror(errno));
+        close(sock);
+        return -1;
+    }
     timestamp_data.mutex = &mutex;
 
-    pthread_create(&timestamp_pthread, 0, timestamp_thread, (void *)&timestamp_data);
+    if (0 != pthread_create(&timestamp_pthread, 0, timestamp_thread, (void *)&timestamp_data))
+    {
+        syslog(LOG_ERR, "Failed to create timestamp thread");
+        close(timestamp_data.fd);
+        close(sock);
+        return -1;
+    }
 #endif
 
     // Main server loop
@@ -406,7 +390,7 @@ int main(int argc, char **argv)
         // Make a file descriptor for accept select
         fd_set readfds;
         FD_ZERO(&readfds);
-        FD_SET(fd, &readfds);
+        FD_SET(sock, &readfds);
 
         // Create a select timeout for polling exit_flag
         struct timeval timeout;
@@ -430,7 +414,7 @@ int main(int argc, char **argv)
             // Timeout - no connection available, loop back to check exit_flag
             continue;
         }
-        
+
         // Create a new node
         struct thread_data_s *new_thread_data = malloc(sizeof(struct thread_data_s));
 
@@ -439,7 +423,6 @@ int main(int argc, char **argv)
         memset(&new_thread_data->client_addr, 0, sizeof(new_thread_data->client_addr));
         new_thread_data->client_addr_len = sizeof(new_thread_data->client_addr);
         new_thread_data->client_sock = accept(sock, (struct sockaddr *)&new_thread_data->client_addr, &new_thread_data->client_addr_len);
-        new_thread_data->fd = fd;
         new_thread_data->mutex = &mutex;
 
         if (new_thread_data->client_sock == -1)
@@ -457,6 +440,7 @@ int main(int argc, char **argv)
         if (0 != pthread_create(&new_thread_data->thread, 0, connection_thread, (void *)new_thread_data))
         {
             syslog(LOG_ERR, "Failed to create new thread");
+            close(new_thread_data->client_sock);
             free(new_thread_data);
             continue;
         }
@@ -496,6 +480,7 @@ int main(int argc, char **argv)
 
 #ifndef USE_AESD_CHAR_DEVICE
     pthread_join(timestamp_pthread, NULL);
+    close(timestamp_data.fd);
 #endif
 
     // Join remaining connections
@@ -521,7 +506,6 @@ int main(int argc, char **argv)
 
     pthread_mutex_destroy(&mutex);
     close(sock);
-    close(fd);
 
 #ifndef USE_AESD_CHAR_DEVICE
     // Only delete the file if we are using the temp file
