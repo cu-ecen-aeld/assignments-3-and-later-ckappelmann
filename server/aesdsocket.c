@@ -59,16 +59,6 @@ void *connection_thread(void *data)
 
     struct thread_data_s *thread_data = (struct thread_data_s *)data;
 
-    // Open data file
-    thread_data->fd = open(WRITE_FILE, O_RDWR | O_CREAT, 0644);
-    if (thread_data->fd < 0)
-    {
-        syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
-        close(thread_data->client_sock);
-        thread_data->finished = true;
-        return data;
-    }
-
     char *client_ip = inet_ntoa(thread_data->client_addr.sin_addr);
     syslog(LOG_INFO, "Accepted connection from %s", client_ip);
 
@@ -136,6 +126,19 @@ void *connection_thread(void *data)
                 break;
             }
 
+            // Open data file
+            thread_data->fd = open(WRITE_FILE, O_RDWR  | O_CREAT, 0644);
+            if (thread_data->fd < 0)
+            {
+                syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
+                connection_error = true;
+                if (0 != pthread_mutex_unlock(thread_data->mutex))
+                {
+                    syslog(LOG_ERR, "Failed to unlock mutex");
+                }
+                break;
+            }
+
             if (write(thread_data->fd, buffer, packet_size) == -1)
             {
                 syslog(LOG_ERR, "Failed to write data to file: %s", strerror(errno));
@@ -147,9 +150,14 @@ void *connection_thread(void *data)
                 break;
             }
 
-            if (lseek(thread_data->fd, 0, SEEK_SET) == -1)
+            // Close the file for writing
+            close(thread_data->fd);
+
+            // Reopen for reading
+            thread_data->fd = open(WRITE_FILE, O_RDONLY | O_CREAT, 0644);
+            if (thread_data->fd < 0)
             {
-                syslog(LOG_ERR, "Failed to seek to beginning of file: %s", strerror(errno));
+                syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
                 connection_error = true;
                 if (0 != pthread_mutex_unlock(thread_data->mutex))
                 {
