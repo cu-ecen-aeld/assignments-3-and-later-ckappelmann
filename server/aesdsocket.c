@@ -60,7 +60,7 @@ void *connection_thread(void *data)
     struct thread_data_s *thread_data = (struct thread_data_s *)data;
 
     // Open data file
-    thread_data->fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    thread_data->fd = open(WRITE_FILE, O_RDWR | O_CREAT, 0644);
     if (thread_data->fd < 0)
     {
         syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
@@ -366,7 +366,7 @@ int main(int argc, char **argv)
 
     pthread_t timestamp_pthread;
     struct timestamp_data_s timestamp_data;
-    timestamp_data.fd = open(WRITE_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    timestamp_data.fd = open(WRITE_FILE, O_RDWR | O_CREAT, 0644);
     if (timestamp_data.fd < 0)
     {
         syslog(LOG_ERR, "Failed to open file: %s", strerror(errno));
