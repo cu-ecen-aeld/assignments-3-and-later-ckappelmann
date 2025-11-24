@@ -19,6 +19,7 @@
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
 #include <linux/slab.h>
+#include "aesd_ioctl.h"
 
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
@@ -164,7 +165,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
             // Write a full packet into the circular buffer
             packet_length = i + 1;
-            
+
             ret = mutex_lock_interruptible(&dev->buffer_mutex);
             if (ret != 0)
             {
@@ -204,12 +205,57 @@ cleanup:
     return retval;
 }
 
+loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
+{
+    struct aesd_dev *dev;
+    size_t total_count;
+
+    dev = filp->private_data;
+    mutex_lock(&dev->buffer_mutex);
+    total_count = aesd_circular_buffer_get_count(&dev->buffer);
+    mutex_unlock(&dev->buffer_mutex);
+
+    return fixed_size_llseek(filp, offset, whence, total_count);
+}
+
+loff_t aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_seekto data;
+    ssize_t result;
+    struct aesd_dev *dev;
+    dev = filp->private_data;
+
+    switch (cmd)
+    {
+    case AESDCHAR_IOCSEEKTO:
+        if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
+        {
+            return -EFAULT;
+        }
+        mutex_lock(&dev->buffer_mutex);
+        result = aesd_circular_buffer_get_absolute_offset(&dev->buffer, data.write_cmd, data.write_cmd_offset);
+        mutex_unlock(&dev->buffer_mutex);
+        if (result < 0)
+        {
+            return -EINVAL;
+        }
+        filp->f_pos = result;
+        break;
+    default:
+        return -ENOTTY;
+    }
+
+    return 0;
+}
+
 struct file_operations aesd_fops = {
     .owner = THIS_MODULE,
     .read = aesd_read,
     .write = aesd_write,
     .open = aesd_open,
     .release = aesd_release,
+    .llseek = aesd_llseek,
+    .unlocked_ioctl = aesd_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -288,7 +334,8 @@ void aesd_cleanup_module(void)
     }
 
     // Free the input buffer
-    if(aesd_device.input_buffer != NULL) {
+    if (aesd_device.input_buffer != NULL)
+    {
         kfree(aesd_device.input_buffer);
     }
 
