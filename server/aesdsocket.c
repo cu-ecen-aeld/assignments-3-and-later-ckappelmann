@@ -15,6 +15,8 @@
 #include <sys/queue.h>
 #include <pthread.h>
 #include <time.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
+#include <sys/ioctl.h>
 
 #define TAG "aesdsocket"
 #ifdef USE_AESD_CHAR_DEVICE
@@ -68,15 +70,22 @@ void *connection_thread(void *data)
     {
         syslog(LOG_ERR, "Failed to allocate memory for receive buffer");
         close(thread_data->client_sock);
-        close(thread_data->fd);
         thread_data->finished = true;
         return data;
     }
     size_t buffer_length = 0;
     size_t buffer_capacity = BUFFER_SIZE;
+    bool connection_error = false;
+
+    // Open the file
+    thread_data->fd = open(WRITE_FILE, O_RDWR | O_APPEND | O_CREAT, 0644);
+    if (thread_data->fd < 0)
+    {
+        syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
+        connection_error = true;
+    }
 
     // Receive buffer loop
-    bool connection_error = false;
     while (!exit_flag && !connection_error)
     {
         // Check if we need to expand buffer
@@ -118,7 +127,7 @@ void *connection_thread(void *data)
         {
             int packet_size = end_of_packet - buffer + 1;
 
-            // Write packet to file
+            // Lock the file to prevent other threads from accessing it
             if (0 != pthread_mutex_lock(thread_data->mutex))
             {
                 syslog(LOG_ERR, "Failed to lock mutex");
@@ -126,49 +135,41 @@ void *connection_thread(void *data)
                 break;
             }
 
-            // Open data file
-            thread_data->fd = open(WRITE_FILE, O_RDWR  | O_CREAT, 0644);
-            if (thread_data->fd < 0)
+            // Check to see if it is a command packet
+            unsigned int x, y;
+
+            if (sscanf(buffer, "AESDCHAR_IOCSEEKTO:%u,%u", &x, &y) == 2)
             {
-                syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
-                connection_error = true;
-                if (0 != pthread_mutex_unlock(thread_data->mutex))
+                // Found the command
+                struct aesd_seekto seekto;
+                seekto.write_cmd = x;
+                seekto.write_cmd_offset = y;
+                // Write the command
+                if(ioctl(thread_data->fd, AESDCHAR_IOCSEEKTO, &seekto) < 0)
                 {
-                    syslog(LOG_ERR, "Failed to unlock mutex");
+                    syslog(LOG_ERR, "IOCTL error %s", strerror(errno));
+                    connection_error = true;
                 }
-                break;
             }
-
-            if (write(thread_data->fd, buffer, packet_size) == -1)
+            else
             {
-                syslog(LOG_ERR, "Failed to write data to file: %s", strerror(errno));
-                connection_error = true;
-                if (0 != pthread_mutex_unlock(thread_data->mutex))
+                // Write packet to file
+                if (write(thread_data->fd, buffer, packet_size) == -1)
                 {
-                    syslog(LOG_ERR, "Failed to unlock mutex");
+                    syslog(LOG_ERR, "Failed to write data to file: %s", strerror(errno));
+                    connection_error = true;
                 }
-                break;
-            }
-
-            // Close the file for writing
-            close(thread_data->fd);
-
-            // Reopen for reading
-            thread_data->fd = open(WRITE_FILE, O_RDONLY | O_CREAT, 0644);
-            if (thread_data->fd < 0)
-            {
-                syslog(LOG_ERR, "Failed to open file: %s, %s", WRITE_FILE, strerror(errno));
-                connection_error = true;
-                if (0 != pthread_mutex_unlock(thread_data->mutex))
+                // Seek to the beginning
+                if (lseek(thread_data->fd, 0, SEEK_SET) < 0)
                 {
-                    syslog(LOG_ERR, "Failed to unlock mutex");
+                    syslog(LOG_ERR, "Failed to seek to beginning of the file: %s", strerror(errno));
+                    connection_error = true;
                 }
-                break;
             }
 
             char send_buffer[1024];
-            ssize_t bytes_read;
-            while ((bytes_read = read(thread_data->fd, send_buffer, sizeof(send_buffer))) > 0)
+            ssize_t bytes_read = 0;
+            while ((bytes_read = read(thread_data->fd, send_buffer, sizeof(send_buffer))) > 0 && !connection_error)
             {
                 ssize_t bytes_sent = 0;
                 while (bytes_sent < bytes_read)
@@ -181,14 +182,6 @@ void *connection_thread(void *data)
                         break;
                     }
                     bytes_sent += sent;
-                }
-                if (connection_error)
-                {
-                    if (0 != pthread_mutex_unlock(thread_data->mutex))
-                    {
-                        syslog(LOG_ERR, "Failed to unlock mutex");
-                    }
-                    break;
                 }
             }
 
@@ -210,6 +203,10 @@ void *connection_thread(void *data)
             memmove(buffer, buffer + packet_size, buffer_length - packet_size);
             buffer_length -= packet_size;
             search_start = buffer;
+
+            if(connection_error) {
+                break;
+            }
         }
     }
 
