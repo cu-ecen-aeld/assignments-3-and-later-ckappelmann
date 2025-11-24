@@ -218,7 +218,7 @@ loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
     return fixed_size_llseek(filp, offset, whence, total_count);
 }
 
-loff_t aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     struct aesd_seekto data;
     ssize_t result;
